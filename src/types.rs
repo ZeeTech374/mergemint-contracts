@@ -24,6 +24,13 @@ pub struct Bounty {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
+pub struct ContractConfig {
+    pub admin: Option<Address>,
+    pub bounty_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
 pub struct Contributor {
     pub address: Address,
     pub reputation: u32,

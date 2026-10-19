@@ -4,7 +4,7 @@ use soroban_sdk::{
 
 use crate::events;
 use crate::storage;
-use crate::types::{Bounty, Contributor};
+use crate::types::{Bounty, ContractConfig, Contributor};
 
 const STATUS_OPEN: &str = "open";
 const STATUS_IN_PROGRESS: &str = "in_progress";
@@ -134,5 +134,12 @@ impl MergeMintContract {
 
     pub fn get_bounty_count(env: Env) -> u64 {
         storage::get_bounty_count(&env)
+    }
+
+    pub fn get_config(env: Env) -> ContractConfig {
+        ContractConfig {
+            admin: storage::get_admin(&env),
+            bounty_count: storage::get_bounty_count(&env),
+        }
     }
 }

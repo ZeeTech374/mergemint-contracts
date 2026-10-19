@@ -17,11 +17,36 @@ fn generate_bounty_id(env: &Env) -> BytesN<32> {
     BytesN::from_array(env, &buf)
 }
 
+fn require_admin(env: &Env) -> Address {
+    let admin = storage::get_admin(env).expect("admin not initialized");
+    admin.require_auth();
+    admin
+}
+
 #[contract]
 pub struct MergeMintContract;
 
 #[contractimpl]
 impl MergeMintContract {
+    pub fn init_admin(env: Env, admin: Address) {
+        if storage::get_admin(&env).is_some() {
+            panic!("admin already initialized");
+        }
+        storage::set_admin(&env, &admin);
+    }
+
+    pub fn set_min_reward_amount(env: Env, token: Address, amount: i128) {
+        require_admin(&env);
+        if amount < 0 {
+            panic!("min reward amount cannot be negative");
+        }
+        storage::set_min_reward_amount(&env, &token, &amount);
+    }
+
+    pub fn get_min_reward_amount(env: Env, token: Address) -> i128 {
+        storage::get_min_reward_amount(&env, &token)
+    }
+
     pub fn create_bounty(
         env: Env,
         creator: Address,
@@ -31,6 +56,11 @@ impl MergeMintContract {
         reward_token: Address,
     ) -> BytesN<32> {
         creator.require_auth();
+
+        let min_reward = storage::get_min_reward_amount(&env, &reward_token);
+        if reward_amount < min_reward {
+            panic!("reward amount below configured minimum for token");
+        }
 
         let count = storage::get_bounty_count(&env);
         let id = generate_bounty_id(&env);

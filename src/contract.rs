@@ -33,6 +33,7 @@ impl MergeMintContract {
             panic!("admin already initialized");
         }
         storage::set_admin(&env, &admin);
+        events::emit_admin_initialized(&env, &admin);
     }
 
     pub fn set_min_reward_amount(env: Env, token: Address, amount: i128) {
@@ -41,6 +42,7 @@ impl MergeMintContract {
             panic!("min reward amount cannot be negative");
         }
         storage::set_min_reward_amount(&env, &token, &amount);
+        events::emit_min_reward_amount_updated(&env, &token, &amount);
     }
 
     pub fn get_min_reward_amount(env: Env, token: Address) -> i128 {

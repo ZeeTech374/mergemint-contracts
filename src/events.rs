@@ -31,3 +31,14 @@ pub fn emit_reward_paid(env: &Env, bounty_id: &BytesN<32>, contributor: &Address
         (bounty_id.clone(), *amount),
     );
 }
+
+pub fn emit_admin_initialized(env: &Env, admin: &Address) {
+    let topic = Symbol::new(env, "admin_initialized");
+    env.events().publish((topic,), admin.clone());
+}
+
+pub fn emit_min_reward_amount_updated(env: &Env, token: &Address, amount: &i128) {
+    let topic = Symbol::new(env, "min_reward_amount_updated");
+    env.events()
+        .publish((topic, token.clone()), *amount);
+}

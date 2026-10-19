@@ -42,3 +42,16 @@ pub fn emit_min_reward_amount_updated(env: &Env, token: &Address, amount: &i128)
     env.events()
         .publish((topic, token.clone()), *amount);
 }
+
+pub fn emit_bounty_ownership_transferred(
+    env: &Env,
+    bounty_id: &BytesN<32>,
+    previous_owner: &Address,
+    new_owner: &Address,
+) {
+    let topic = Symbol::new(env, "bounty_ownership_transferred");
+    env.events().publish(
+        (topic, bounty_id.clone()),
+        (previous_owner.clone(), new_owner.clone()),
+    );
+}

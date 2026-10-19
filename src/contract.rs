@@ -138,6 +138,26 @@ impl MergeMintContract {
         storage::get_bounty_count(&env)
     }
 
+    pub fn transfer_bounty_ownership(
+        env: Env,
+        current_owner: Address,
+        bounty_id: BytesN<32>,
+        new_owner: Address,
+    ) {
+        current_owner.require_auth();
+
+        let mut bounty = storage::get_bounty(&env, &bounty_id).expect("bounty not found");
+
+        if bounty.creator != current_owner {
+            panic!("only the current owner can transfer bounty ownership");
+        }
+
+        bounty.creator = new_owner.clone();
+        storage::store_bounty(&env, &bounty_id, &bounty);
+
+        events::emit_bounty_ownership_transferred(&env, &bounty_id, &current_owner, &new_owner);
+    }
+
     pub fn get_config(env: Env) -> ContractConfig {
         ContractConfig {
             admin: storage::get_admin(&env),

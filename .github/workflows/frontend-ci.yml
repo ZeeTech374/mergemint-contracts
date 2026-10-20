@@ -1,0 +1,129 @@
+name: Frontend CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+      - "ci/**"
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+  pull_request:
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+
+jobs:
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Cache node_modules
+        uses: actions/cache@v6
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Run TypeScript type check
+        run: npx tsc --noEmit
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Cache node_modules
+        uses: actions/cache@v6
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Run ESLint
+        run: npx eslint src
+        continue-on-error: true
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Cache node_modules
+        uses: actions/cache@v6
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Run unit tests
+        run: npx vitest run
+
+      - name: Check i18n key completeness
+        run: npx vitest run src/i18n/i18n-completeness.test.ts
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Cache node_modules
+        uses: actions/cache@v6
+        with:
+          path: frontend/node_modules
+          key: ${{ runner.os }}-frontend-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Build
+        run: npx vite build

@@ -7,11 +7,16 @@ edition = "2021"
 crate-type = ["cdylib"]
 doctest = false
 
+[features]
+fuzz = ["dep:proptest"]
+
 [dependencies]
-soroban-sdk = "23.0.0"
+soroban-sdk = "29.0.1"
+proptest = { version = "1.4", optional = true }
 
 [dev-dependencies]
-soroban-sdk = { version = "23.0.0", features = ["testutils"] }
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
+proptest = "1.4"
 
 [profile.release]
 opt-level = "z"

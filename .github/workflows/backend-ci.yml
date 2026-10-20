@@ -1,0 +1,133 @@
+# .github/workflows/backend-ci.yml
+#
+# Full CI pipeline for mergemint-backend (Rust service).
+#
+# Implements issue #487 — "stand up a test harness for mergemint-backend".
+# Referenced by issue #116.
+#
+# Jobs:
+#   fmt      — enforce consistent code style with `cargo fmt --check`
+#   clippy   — static analysis; warnings are errors in CI
+#   test     — run the full test suite with `cargo test`
+#   build    — ensure the production binary compiles in release mode
+#
+# All jobs are scoped to changes under `mergemint-backend/` so they do not
+# fire on unrelated commits. Jobs that compile use Swatinem/rust-cache to
+# reuse the cargo registry and target/ between runs.
+
+name: Backend CI
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "test/**"]
+    paths:
+      - "mergemint-backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "mergemint-backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+defaults:
+  run:
+    working-directory: mergemint-backend
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Formatting
+  # --------------------------------------------------------------------------
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        id: fmt-check
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: Show formatting diff on failure
+        if: steps.fmt-check.outcome == 'failure'
+        run: |
+          echo "::group::rustfmt diff (files that would be reformatted)"
+          cargo fmt --all -- --check --color=always || true
+          echo "::endgroup::"
+          echo "Formatting check failed. Run 'cargo fmt --all' locally and commit the result."
+          exit 1
+
+  # --------------------------------------------------------------------------
+  # 2. Linting
+  # --------------------------------------------------------------------------
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mergemint-backend -> target
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # --------------------------------------------------------------------------
+  # 3. Tests
+  # --------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mergemint-backend -> target
+
+      - name: Run tests
+        run: cargo test --all-features
+
+  # --------------------------------------------------------------------------
+  # 4. Release build (verify no compile errors in optimised mode)
+  # --------------------------------------------------------------------------
+  build:
+    name: Release Build
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, test]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mergemint-backend -> target
+
+      - name: Build (release)
+        run: cargo build --release

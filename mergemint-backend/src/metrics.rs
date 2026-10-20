@@ -126,6 +126,18 @@ impl Metrics {
             self.indexer_lag.load(Ordering::Relaxed)
         ));
 
+        let (cache_hits, cache_misses) = crate::routes::leaderboard::leaderboard_cache_counts();
+        out.push_str(
+            "# HELP mergemint_leaderboard_cache_total Leaderboard cache requests by result.\n",
+        );
+        out.push_str("# TYPE mergemint_leaderboard_cache_total counter\n");
+        out.push_str(&format!(
+            "mergemint_leaderboard_cache_total{{result=\"hit\"}} {cache_hits}\n"
+        ));
+        out.push_str(&format!(
+            "mergemint_leaderboard_cache_total{{result=\"miss\"}} {cache_misses}\n"
+        ));
+
         out
     }
 }

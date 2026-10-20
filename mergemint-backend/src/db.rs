@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Migrations
@@ -59,6 +60,7 @@ pub struct DbStore {
     pub audit_logs: Vec<AuditLog>,
     /// Registered webhook subscriptions (see `webhooks.rs`).
     pub webhook_subscriptions: Vec<WebhookSubscription>,
+    stats_cache: Option<StatsCacheEntry>,
     /// Set by `close_db` to simulate a lost connection pool; `ping_db` (and
     /// therefore `/ready`) reports the store as unavailable while it is set.
     pub is_closed: bool,
@@ -168,6 +170,10 @@ impl AuditLog {
 pub struct Bounty {
     pub id: String,
     pub creator: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
     pub assignee: Option<String>,
     pub created_at: DateTime<Utc>,
     /// Reward amount, mirrored from the contract's `Bounty::reward_amount`.
@@ -181,6 +187,74 @@ pub struct Bounty {
     /// Tags attached to the bounty, used by the `tag` listing filter.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Reward token contract address, used to keep aggregate totals in a
+    /// single unit. Older indexed rows may not have this value yet.
+    #[serde(default)]
+    pub reward_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct TokenTotal {
+    pub token_address: String,
+    pub amount: i128,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct StatsResponse {
+    pub open_bounties: u64,
+    pub total_paid_out: Vec<TokenTotal>,
+    pub active_contributors: u64,
+}
+
+#[derive(Debug, Clone)]
+struct StatsCacheEntry {
+    data: StatsResponse,
+    expires_at: Instant,
+}
+
+/// Return platform aggregates, retaining the result for the requested TTL.
+/// Payout totals are separated by reward token so unlike units are never added.
+pub fn get_stats(db: &SharedDb, ttl: Duration) -> StatsResponse {
+    let mut guard = acquire_db(db);
+    if let Some(cached) = &guard.stats_cache {
+        if Instant::now() < cached.expires_at {
+            return cached.data.clone();
+        }
+    }
+
+    let mut totals = std::collections::BTreeMap::<String, i128>::new();
+    let mut contributors = std::collections::HashSet::new();
+    let mut open_bounties = 0_u64;
+    for bounty in &guard.bounties {
+        if bounty.status == "open" {
+            open_bounties += 1;
+        }
+        if let Some(assignee) = bounty.assignee.as_deref().filter(|value| !value.is_empty()) {
+            contributors.insert(assignee.to_string());
+        }
+        if bounty.status == "completed" {
+            if let Some(token) = bounty.reward_token.as_deref() {
+                *totals.entry(token.to_string()).or_default() += bounty.reward;
+            }
+        }
+    }
+
+    let data = StatsResponse {
+        open_bounties,
+        total_paid_out: totals
+            .into_iter()
+            .map(|(token_address, amount)| TokenTotal {
+                token_address,
+                amount,
+            })
+            .collect(),
+        active_contributors: contributors.len() as u64,
+    };
+    guard.stats_cache = Some(StatsCacheEntry {
+        data: data.clone(),
+        expires_at: Instant::now() + ttl,
+    });
+    data
 }
 
 fn default_bounty_status() -> String {
@@ -192,12 +266,15 @@ impl Default for Bounty {
         Bounty {
             id: String::new(),
             creator: String::new(),
+            title: String::new(),
+            description: String::new(),
             assignee: None,
             created_at: DateTime::<Utc>::default(),
             reward: 0,
             deadline: None,
             status: default_bounty_status(),
             tags: Vec::new(),
+            reward_token: None,
         }
     }
 }
@@ -248,6 +325,7 @@ pub fn list_bounties_by_creator(
     cursor: Option<DateTime<Utc>>,
     status: Option<&str>,
     tag: Option<&str>,
+    query: Option<&str>,
     sort: BountySortField,
     order: SortOrder,
 ) -> BountyPage {
@@ -258,6 +336,13 @@ pub fn list_bounties_by_creator(
         .filter(|b| creator.is_empty() || b.creator == creator)
         .filter(|b| status.is_none_or(|s| b.status == s))
         .filter(|b| tag.is_none_or(|t| b.tags.iter().any(|bt| bt == t)))
+        .filter(|b| {
+            query.is_none_or(|q| {
+                let searchable = format!("{} {}", b.title, b.description).to_lowercase();
+                q.split_whitespace()
+                    .all(|term| searchable.contains(&term.to_lowercase()))
+            })
+        })
         .filter(|b| cursor.is_none_or(|c| b.created_at < c))
         .cloned()
         .collect();

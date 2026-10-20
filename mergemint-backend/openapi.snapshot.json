@@ -21,6 +21,9 @@
         "/leaderboard": [
             "get"
         ],
+        "/stats": [
+            "get"
+        ],
         "/webhooks/subscriptions": [
             "get"
         ],
@@ -52,10 +55,13 @@
                 "created_at",
                 "creator",
                 "deadline",
+                "description",
                 "id",
                 "reward",
+                "reward_token",
                 "status",
-                "tags"
+                "tags",
+                "title"
             ],
             "enum": null
         },
@@ -108,6 +114,21 @@
                 "asc",
                 "desc"
             ]
+        },
+        "StatsResponse": {
+            "fields": [
+                "active_contributors",
+                "open_bounties",
+                "total_paid_out"
+            ],
+            "enum": null
+        },
+        "TokenTotal": {
+            "fields": [
+                "amount",
+                "token_address"
+            ],
+            "enum": null
         },
         "WebhookSubscription": {
             "fields": [

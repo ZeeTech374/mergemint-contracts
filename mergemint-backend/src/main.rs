@@ -75,7 +75,10 @@ use std::time::Duration;
 use axum::{
     body::Body,
     extract::State,
-    http::{header::CONTENT_TYPE, HeaderName, HeaderValue, Method, Request, StatusCode},
+    http::{
+        header::{CONTENT_TYPE, ETAG, IF_NONE_MATCH},
+        HeaderName, HeaderValue, Method, Request, StatusCode,
+    },
     middleware,
     middleware::Next,
     response::{Html, IntoResponse, Response},
@@ -164,6 +167,7 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::bounties::claim_bounty,
         routes::bounties::bounty_stream,
         routes::leaderboard::get_leaderboard_route,
+        routes::stats::get_stats_route,
         routes::tx::query_audit_logs,
         notifications::create_email_subscription,
         notifications::verify_email,
@@ -182,6 +186,8 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         db::AuditLog,
         db::LeaderboardEntry,
         db::LeaderboardPage,
+        db::StatsResponse,
+        db::TokenTotal,
         db::WebhookSubscription,
         notifications::CreateEmailSubscriptionRequest,
     )),
@@ -284,6 +290,7 @@ async fn main() {
             get(list_bounties_by_assignee),
         )
         .route("/leaderboard", get(get_leaderboard_route))
+        .route("/stats", get(routes::stats::get_stats_route))
         // ── Bounty push channel (#482) ─────────────────────────────────────
         .route("/bounties/:id/claim", post(claim_bounty))
         .route("/bounties/stream", get(bounty_stream))
@@ -462,7 +469,8 @@ fn cors_layer() -> CorsLayer {
 
     CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([CONTENT_TYPE])
+        .allow_headers([CONTENT_TYPE, IF_NONE_MATCH])
+        .expose_headers([ETAG])
         .allow_origin(AllowOrigin::list(allowed))
 }
 
@@ -622,6 +630,7 @@ mod tests {
             "/bounties/assignee/{address}",
             "/admin/audit-logs",
             "/leaderboard",
+            "/stats",
             "/webhooks/subscriptions",
             "/webhooks/subscriptions/{id}",
         ] {
@@ -714,6 +723,7 @@ mod tests {
                 get(list_bounties_by_assignee),
             )
             .route("/leaderboard", get(get_leaderboard_route))
+            .route("/stats", get(routes::stats::get_stats_route))
             .route("/webhooks/subscriptions", get(list_subscriptions_route))
             .route("/webhooks/subscriptions/:id", get(get_subscription_route))
             .with_state(state);
@@ -726,6 +736,7 @@ mod tests {
             ("/bounties/bounty-1", "/bounties/{id}"),
             (assignee_uri.as_str(), "/bounties/assignee/{address}"),
             ("/leaderboard", "/leaderboard"),
+            ("/stats", "/stats"),
             ("/webhooks/subscriptions", "/webhooks/subscriptions"),
             (
                 "/webhooks/subscriptions/sub-1",

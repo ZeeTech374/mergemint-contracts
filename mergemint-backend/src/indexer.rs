@@ -173,6 +173,10 @@ pub fn poll_once(state: &mut IndexerState, events: &[RawEvent], page_complete: b
             }
         };
 
+        if matches!(event_name.as_str(), "reward_paid" | "reputation_changed") {
+            crate::routes::leaderboard::invalidate_leaderboard_cache();
+        }
+
         // ── Issue 2: log unrecognised events instead of silent drop ──────
         //
         // Prior to this fix, events not in SINGLE_VALUE_EVENTS/TUPLE_EVENTS

@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Migrations
@@ -59,6 +60,7 @@ pub struct DbStore {
     pub audit_logs: Vec<AuditLog>,
     /// Registered webhook subscriptions (see `webhooks.rs`).
     pub webhook_subscriptions: Vec<WebhookSubscription>,
+    stats_cache: Option<StatsCacheEntry>,
     /// Email notification subscriptions waiting for verification or delivery.
     pub email_subscriptions: Vec<EmailSubscription>,
     /// Bounty ids for which the deadline reminder has already been published.
@@ -321,6 +323,10 @@ impl AuditLog {
 pub struct Bounty {
     pub id: String,
     pub creator: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
     pub assignee: Option<String>,
     pub created_at: DateTime<Utc>,
     /// Reward amount, mirrored from the contract's `Bounty::reward_amount`.
@@ -334,6 +340,74 @@ pub struct Bounty {
     /// Tags attached to the bounty, used by the `tag` listing filter.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Reward token contract address, used to keep aggregate totals in a
+    /// single unit. Older indexed rows may not have this value yet.
+    #[serde(default)]
+    pub reward_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct TokenTotal {
+    pub token_address: String,
+    pub amount: i128,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct StatsResponse {
+    pub open_bounties: u64,
+    pub total_paid_out: Vec<TokenTotal>,
+    pub active_contributors: u64,
+}
+
+#[derive(Debug, Clone)]
+struct StatsCacheEntry {
+    data: StatsResponse,
+    expires_at: Instant,
+}
+
+/// Return platform aggregates, retaining the result for the requested TTL.
+/// Payout totals are separated by reward token so unlike units are never added.
+pub fn get_stats(db: &SharedDb, ttl: Duration) -> StatsResponse {
+    let mut guard = acquire_db(db);
+    if let Some(cached) = &guard.stats_cache {
+        if Instant::now() < cached.expires_at {
+            return cached.data.clone();
+        }
+    }
+
+    let mut totals = std::collections::BTreeMap::<String, i128>::new();
+    let mut contributors = std::collections::HashSet::new();
+    let mut open_bounties = 0_u64;
+    for bounty in &guard.bounties {
+        if bounty.status == "open" {
+            open_bounties += 1;
+        }
+        if let Some(assignee) = bounty.assignee.as_deref().filter(|value| !value.is_empty()) {
+            contributors.insert(assignee.to_string());
+        }
+        if bounty.status == "completed" {
+            if let Some(token) = bounty.reward_token.as_deref() {
+                *totals.entry(token.to_string()).or_default() += bounty.reward;
+            }
+        }
+    }
+
+    let data = StatsResponse {
+        open_bounties,
+        total_paid_out: totals
+            .into_iter()
+            .map(|(token_address, amount)| TokenTotal {
+                token_address,
+                amount,
+            })
+            .collect(),
+        active_contributors: contributors.len() as u64,
+    };
+    guard.stats_cache = Some(StatsCacheEntry {
+        data: data.clone(),
+        expires_at: Instant::now() + ttl,
+    });
+    data
 }
 
 fn default_bounty_status() -> String {
@@ -345,12 +419,15 @@ impl Default for Bounty {
         Bounty {
             id: String::new(),
             creator: String::new(),
+            title: String::new(),
+            description: String::new(),
             assignee: None,
             created_at: DateTime::<Utc>::default(),
             reward: 0,
             deadline: None,
             status: default_bounty_status(),
             tags: Vec::new(),
+            reward_token: None,
         }
     }
 }
@@ -401,6 +478,7 @@ pub fn list_bounties_by_creator(
     cursor: Option<DateTime<Utc>>,
     status: Option<&str>,
     tag: Option<&str>,
+    query: Option<&str>,
     sort: BountySortField,
     order: SortOrder,
 ) -> BountyPage {
@@ -411,6 +489,13 @@ pub fn list_bounties_by_creator(
         .filter(|b| creator.is_empty() || b.creator == creator)
         .filter(|b| status.is_none_or(|s| b.status == s))
         .filter(|b| tag.is_none_or(|t| b.tags.iter().any(|bt| bt == t)))
+        .filter(|b| {
+            query.is_none_or(|q| {
+                let searchable = format!("{} {}", b.title, b.description).to_lowercase();
+                q.split_whitespace()
+                    .all(|term| searchable.contains(&term.to_lowercase()))
+            })
+        })
         .filter(|b| cursor.is_none_or(|c| b.created_at < c))
         .cloned()
         .collect();
@@ -880,89 +965,4 @@ mod tests {
             }
         }
 
-        let page = get_leaderboard(&db, 5);
-        assert_eq!(page.entries.len(), 5);
-    }
-
-    #[test]
-    fn test_leaderboard_returns_empty_page_when_no_bounties() {
-        let db = new_shared_db();
-
-        let page = get_leaderboard(&db, 100);
-        assert!(page.entries.is_empty());
-    }
-
-    #[test]
-    fn test_ping_db_healthy_and_closed() {
-        let db = new_shared_db();
-        assert!(ping_db(&db).is_ok());
-
-        close_db(&db);
-        assert_eq!(ping_db(&db), Err("database connection is closed"));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Leaderboard
-// ---------------------------------------------------------------------------
-
-/// A contributor entry in the leaderboard, ranked by reputation and completed
-/// bounties. Aggregates stats across the bounties table.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct LeaderboardEntry {
-    pub address: String,
-    pub completed_bounties: i64,
-    pub reputation: i64,
-}
-
-/// A page of leaderboard entries, ranked by reputation (descending) and
-/// completed bounties (descending).
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
-pub struct LeaderboardPage {
-    pub entries: Vec<LeaderboardEntry>,
-}
-
-/// Aggregate contributor statistics from completed bounties and compute a
-/// leaderboard, ranked by reputation (descending), then by completed bounties
-/// (descending).
-///
-/// `limit` is trusted to already be clamped by the caller; this function does
-/// not re-validate it.
-pub fn get_leaderboard(db: &SharedDb, limit: i64) -> LeaderboardPage {
-    let guard = read_db(db);
-
-    // Aggregate completed bounties per assignee
-    let mut contributor_stats: HashMap<String, (i64, i64)> = HashMap::new();
-
-    for bounty in &guard.bounties {
-        if let Some(assignee) = &bounty.assignee {
-            let (count, reputation) = contributor_stats.entry(assignee.clone()).or_insert((0, 0));
-            *count += 1;
-            // Simple reputation model: 1 point per completed bounty
-            *reputation += 1;
-        }
-    }
-
-    // Convert to leaderboard entries and sort by reputation (descending),
-    // then by completed bounties (descending)
-    let mut entries: Vec<LeaderboardEntry> = contributor_stats
-        .into_iter()
-        .map(
-            |(address, (completed_bounties, reputation))| LeaderboardEntry {
-                address,
-                completed_bounties,
-                reputation,
-            },
-        )
-        .collect();
-
-    entries.sort_by(|a, b| match b.reputation.cmp(&a.reputation) {
-        std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
-        other => other,
-    });
-
-    let limit = usize::try_from(limit).unwrap_or(0);
-    entries.truncate(limit);
-
-    LeaderboardPage { entries }
-}
+        let page

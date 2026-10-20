@@ -685,12 +685,7 @@ mod tests {
         let state = test_state();
         seed_bounties(&state, 1);
 
-        let result = get_bounty_route(
-            State(state),
-            Path("0".to_string()),
-            HeaderMap::new(),
-        )
-        .await;
+        let result = get_bounty_route(State(state), Path("0".to_string()), HeaderMap::new()).await;
 
         let response = result.expect("must return bounty");
         let bounty: Bounty = response_json(response).await;
@@ -702,12 +697,8 @@ mod tests {
     async fn get_bounty_route_returns_404_if_not_found() {
         let state = test_state();
 
-        let result = get_bounty_route(
-            State(state),
-            Path("999".to_string()),
-            HeaderMap::new(),
-        )
-        .await;
+        let result =
+            get_bounty_route(State(state), Path("999".to_string()), HeaderMap::new()).await;
 
         let (status, Json(body)) = result.expect_err("must return 404");
         assert_eq!(status, StatusCode::NOT_FOUND);

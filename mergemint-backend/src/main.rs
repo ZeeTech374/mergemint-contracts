@@ -76,8 +76,8 @@ use axum::{
     body::Body,
     extract::State,
     http::{
-        header::{CONTENT_TYPE, ETAG, IF_NONE_MATCH}, HeaderName, HeaderValue, Method, Request,
-        StatusCode,
+        header::{CONTENT_TYPE, ETAG, IF_NONE_MATCH},
+        HeaderName, HeaderValue, Method, Request, StatusCode,
     },
     middleware,
     middleware::Next,

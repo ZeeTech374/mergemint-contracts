@@ -17,7 +17,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -61,6 +61,10 @@ pub struct DbStore {
     /// Registered webhook subscriptions (see `webhooks.rs`).
     pub webhook_subscriptions: Vec<WebhookSubscription>,
     stats_cache: Option<StatsCacheEntry>,
+    /// Email notification subscriptions waiting for verification or delivery.
+    pub email_subscriptions: Vec<EmailSubscription>,
+    /// Bounty ids for which the deadline reminder has already been published.
+    pub deadline_reminders_sent: HashSet<String>,
     /// Set by `close_db` to simulate a lost connection pool; `ping_db` (and
     /// therefore `/ready`) reports the store as unavailable while it is set.
     pub is_closed: bool,
@@ -83,6 +87,155 @@ pub struct WebhookSubscription {
     pub event_types: Vec<String>,
     pub active: bool,
     pub created_at: DateTime<Utc>,
+}
+
+/// An opt-in email address associated with a contributor wallet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmailSubscription {
+    pub id: String,
+    pub contributor_address: String,
+    pub email: String,
+    #[serde(skip_serializing)]
+    pub verification_token: Option<String>,
+    #[serde(skip_serializing)]
+    pub unsubscribe_token: String,
+    pub verified: bool,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Create an unverified email subscription.
+pub fn add_email_subscription(
+    db: &SharedDb,
+    contributor_address: String,
+    email: String,
+    verification_token: String,
+    unsubscribe_token: String,
+) -> EmailSubscription {
+    let subscription = EmailSubscription {
+        id: uuid::Uuid::new_v4().to_string(),
+        contributor_address,
+        email,
+        verification_token: Some(verification_token),
+        unsubscribe_token,
+        verified: false,
+        active: true,
+        created_at: Utc::now(),
+    };
+    let mut guard = acquire_db(db);
+    if let Some(existing) = guard.email_subscriptions.iter().find(|existing| {
+        existing.contributor_address == subscription.contributor_address
+            && existing.email == subscription.email
+            && existing.verified
+            && existing.active
+    }) {
+        return existing.clone();
+    }
+    guard.email_subscriptions.retain(|existing| {
+        existing.contributor_address != subscription.contributor_address
+            || existing.email != subscription.email
+    });
+    guard.email_subscriptions.push(subscription.clone());
+    subscription
+}
+
+/// Verify an email address using its single-use verification token.
+pub fn verify_email_subscription(db: &SharedDb, token: &str) -> bool {
+    let mut guard = acquire_db(db);
+    if let Some(subscription) = guard
+        .email_subscriptions
+        .iter_mut()
+        .find(|subscription| {
+            subscription.verification_token.as_deref() == Some(token) && subscription.active
+        })
+    {
+        subscription.verified = true;
+        subscription.verification_token = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Disable an email subscription using its per-address unsubscribe token.
+pub fn unsubscribe_email_subscription(db: &SharedDb, token: &str) -> bool {
+    let mut guard = acquire_db(db);
+    if let Some(subscription) = guard
+        .email_subscriptions
+        .iter_mut()
+        .find(|subscription| subscription.unsubscribe_token == token && subscription.active)
+    {
+        subscription.active = false;
+        true
+    } else {
+        false
+    }
+}
+
+/// Return verified, active email subscriptions for a contributor wallet.
+pub fn verified_email_subscriptions_for(
+    db: &SharedDb,
+    contributor_address: &str,
+) -> Vec<EmailSubscription> {
+    read_db(db)
+        .email_subscriptions
+        .iter()
+        .filter(|subscription| {
+            subscription.active
+                && subscription.verified
+                && subscription.contributor_address == contributor_address
+        })
+        .cloned()
+        .collect()
+}
+
+/// Change a bounty's status after the indexer observes a work submission.
+pub fn mark_bounty_submitted(db: &SharedDb, bounty_id: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.status = "submitted".to_string();
+    }
+}
+
+/// Record an indexed claim so subscribers can be matched to the assignee.
+pub fn mark_bounty_claimed(db: &SharedDb, bounty_id: &str, assignee: &str) {
+    if let Some(bounty) = acquire_db(db)
+        .bounties
+        .iter_mut()
+        .find(|bounty| bounty.id == bounty_id)
+    {
+        bounty.assignee = Some(assignee.to_string());
+        bounty.status = "claimed".to_string();
+    }
+}
+
+/// Return claimed, unsubmitted bounties whose deadlines are within the lead window.
+pub fn bounties_due_for_deadline_reminder(
+    db: &SharedDb,
+    now: DateTime<Utc>,
+    reminder_at: DateTime<Utc>,
+) -> Vec<Bounty> {
+    let guard = read_db(db);
+    guard
+        .bounties
+        .iter()
+        .filter(|bounty| {
+            bounty.status == "claimed"
+                && bounty
+                    .deadline
+                    .is_some_and(|deadline| deadline > now && deadline <= reminder_at)
+                && !guard.deadline_reminders_sent.contains(&bounty.id)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Record that a reminder was published. Returns false if already recorded.
+pub fn mark_deadline_reminder_sent(db: &SharedDb, bounty_id: String) -> bool {
+    acquire_db(db).deadline_reminders_sent.insert(bounty_id)
 }
 
 /// Register a new, active webhook subscription and return it.
@@ -181,7 +334,7 @@ pub struct Bounty {
     /// Optional expiry, mirrored from the contract's `Bounty::deadline`. `None`
     /// means the bounty never expires.
     pub deadline: Option<DateTime<Utc>>,
-    /// Lifecycle status (`open`, `claimed`, `completed`, `cancelled`).
+    /// Lifecycle status (`open`, `claimed`, `submitted`, `completed`, `cancelled`).
     #[serde(default = "default_bounty_status")]
     pub status: String,
     /// Tags attached to the bounty, used by the `tag` listing filter.
@@ -812,89 +965,4 @@ mod tests {
             }
         }
 
-        let page = get_leaderboard(&db, 5);
-        assert_eq!(page.entries.len(), 5);
-    }
-
-    #[test]
-    fn test_leaderboard_returns_empty_page_when_no_bounties() {
-        let db = new_shared_db();
-
-        let page = get_leaderboard(&db, 100);
-        assert!(page.entries.is_empty());
-    }
-
-    #[test]
-    fn test_ping_db_healthy_and_closed() {
-        let db = new_shared_db();
-        assert!(ping_db(&db).is_ok());
-
-        close_db(&db);
-        assert_eq!(ping_db(&db), Err("database connection is closed"));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Leaderboard
-// ---------------------------------------------------------------------------
-
-/// A contributor entry in the leaderboard, ranked by reputation and completed
-/// bounties. Aggregates stats across the bounties table.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct LeaderboardEntry {
-    pub address: String,
-    pub completed_bounties: i64,
-    pub reputation: i64,
-}
-
-/// A page of leaderboard entries, ranked by reputation (descending) and
-/// completed bounties (descending).
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
-pub struct LeaderboardPage {
-    pub entries: Vec<LeaderboardEntry>,
-}
-
-/// Aggregate contributor statistics from completed bounties and compute a
-/// leaderboard, ranked by reputation (descending), then by completed bounties
-/// (descending).
-///
-/// `limit` is trusted to already be clamped by the caller; this function does
-/// not re-validate it.
-pub fn get_leaderboard(db: &SharedDb, limit: i64) -> LeaderboardPage {
-    let guard = read_db(db);
-
-    // Aggregate completed bounties per assignee
-    let mut contributor_stats: HashMap<String, (i64, i64)> = HashMap::new();
-
-    for bounty in &guard.bounties {
-        if let Some(assignee) = &bounty.assignee {
-            let (count, reputation) = contributor_stats.entry(assignee.clone()).or_insert((0, 0));
-            *count += 1;
-            // Simple reputation model: 1 point per completed bounty
-            *reputation += 1;
-        }
-    }
-
-    // Convert to leaderboard entries and sort by reputation (descending),
-    // then by completed bounties (descending)
-    let mut entries: Vec<LeaderboardEntry> = contributor_stats
-        .into_iter()
-        .map(
-            |(address, (completed_bounties, reputation))| LeaderboardEntry {
-                address,
-                completed_bounties,
-                reputation,
-            },
-        )
-        .collect();
-
-    entries.sort_by(|a, b| match b.reputation.cmp(&a.reputation) {
-        std::cmp::Ordering::Equal => b.completed_bounties.cmp(&a.completed_bounties),
-        other => other,
-    });
-
-    let limit = usize::try_from(limit).unwrap_or(0);
-    entries.truncate(limit);
-
-    LeaderboardPage { entries }
-}
+        let page

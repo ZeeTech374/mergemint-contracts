@@ -21,6 +21,15 @@
         "/leaderboard": [
             "get"
         ],
+        "/notifications/subscriptions": [
+            "post"
+        ],
+        "/notifications/unsubscribe": [
+            "get"
+        ],
+        "/notifications/verify": [
+            "get"
+        ],
         "/stats": [
             "get"
         ],
@@ -98,6 +107,13 @@
         "LeaderboardPage": {
             "fields": [
                 "entries"
+            ],
+            "enum": null
+        },
+        "CreateEmailSubscriptionRequest": {
+            "fields": [
+                "contributor_address",
+                "email"
             ],
             "enum": null
         },

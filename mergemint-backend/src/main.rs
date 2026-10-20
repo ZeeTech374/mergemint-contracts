@@ -95,7 +95,10 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use utoipa::OpenApi;
 
 mod db;
+mod deadline_reminders;
+mod events;
 mod metrics;
+mod notifications;
 mod rate_limit;
 mod routes;
 #[cfg(test)]
@@ -114,6 +117,13 @@ use routes::tx::{
 use webhooks::{
     create_subscription_route, delete_subscription_route, get_subscription_route,
     list_subscriptions_route, start_webhook_dispatcher, RetryConfig,
+};
+use deadline_reminders::{
+    read_deadline_reminder_interval, read_deadline_reminder_lead_time,
+    start_deadline_reminder_job,
+};
+use notifications::{
+    create_email_subscription, start_email_notifier, unsubscribe_email, verify_email,
 };
 
 /// Maximum allowed request body size (1 MiB).
@@ -159,6 +169,9 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         routes::leaderboard::get_leaderboard_route,
         routes::stats::get_stats_route,
         routes::tx::query_audit_logs,
+        notifications::create_email_subscription,
+        notifications::verify_email,
+        notifications::unsubscribe_email,
         webhooks::list_subscriptions_route,
         webhooks::get_subscription_route,
     ),
@@ -176,8 +189,12 @@ const LOG_FORMAT_ENV: &str = "LOG_FORMAT";
         db::StatsResponse,
         db::TokenTotal,
         db::WebhookSubscription,
+        notifications::CreateEmailSubscriptionRequest,
     )),
-    tags((name = "bounties", description = "Bounty listing and live updates"))
+    tags(
+        (name = "bounties", description = "Bounty listing and live updates"),
+        (name = "notifications", description = "Email notification subscriptions")
+    )
 )]
 struct ApiDoc;
 
@@ -249,6 +266,12 @@ async fn main() {
         .unwrap_or_default();
     let _webhook_dispatcher =
         start_webhook_dispatcher(state.clone(), webhook_client, RetryConfig::default());
+    let _email_notifier = start_email_notifier(state.clone());
+    let _deadline_reminder_job = start_deadline_reminder_job(
+        state.clone(),
+        read_deadline_reminder_lead_time(),
+        read_deadline_reminder_interval(),
+    );
 
     let metrics = Arc::new(Metrics::new());
 
@@ -279,6 +302,9 @@ async fn main() {
             "/webhooks/subscriptions/:id",
             get(get_subscription_route).delete(delete_subscription_route),
         )
+        .route("/notifications/subscriptions", post(create_email_subscription))
+        .route("/notifications/verify", get(verify_email))
+        .route("/notifications/unsubscribe", get(unsubscribe_email))
         .with_state(state)
         .merge(metrics_router(metrics.clone()))
         // Timeout wraps the handler stack, while metrics remains outermost so

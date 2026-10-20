@@ -27,6 +27,7 @@ use crate::db::{
     list_bounties_by_assignee as db_list_bounties_by_assignee, list_bounties_by_creator, Bounty,
     BountyPage, BountySortField, SortOrder,
 };
+use crate::events::decode_bounty_event;
 use crate::routes::tx::AppState;
 
 // ── Query params ──────────────────────────────────────────────────────────────
@@ -57,7 +58,7 @@ pub struct ListParams {
 
 /// Statuses a bounty may be filtered by. Kept in sync with the values the
 /// store writes; anything outside this set is a client error.
-const VALID_STATUSES: [&str; 4] = ["open", "claimed", "completed", "cancelled"];
+const VALID_STATUSES: [&str; 5] = ["open", "claimed", "submitted", "completed", "cancelled"];
 
 /// Cursors encode a `created_at` position, so they only page correctly when
 /// the listing is ordered newest first (the default `created` + `desc`).
@@ -250,7 +251,7 @@ pub async fn list_bounties_by_assignee(
 /// alphabet. This is not a full checksum validation — it only rejects
 /// inputs malformed enough that querying the store for them can never be
 /// meaningful.
-fn is_syntactically_valid_address(address: &str) -> bool {
+pub(crate) fn is_syntactically_valid_address(address: &str) -> bool {
     address.len() == 56
         && matches!(address.as_bytes().first(), Some(b'G') | Some(b'C'))
         && address
@@ -262,8 +263,8 @@ fn is_syntactically_valid_address(address: &str) -> bool {
 ///
 /// Server-Sent Events channel that broadcasts a bounty ID whenever a bounty's
 /// state changes (see `claim_bounty`). Clients subscribe once and receive
-/// incremental push notifications instead of polling. Event name is
-/// `bounty_updated`, payload `{"bountyId":"<id>"}`. Implements issue #482.
+/// incremental push notifications instead of polling. State changes use the
+/// `bounty_updated` event; deadline reminders use `deadline_approaching`.
 #[utoipa::path(
     get,
     path = "/bounties/stream",
@@ -277,10 +278,16 @@ pub async fn bounty_stream(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.bounty_broadcast.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| {
-        result.ok().map(|bounty_id| {
+        result.ok().map(|message| {
+            let event = decode_bounty_event(&message);
+            let sse_event = if event.name == "deadline_approaching" {
+                "deadline_approaching"
+            } else {
+                "bounty_updated"
+            };
             Ok(Event::default()
-                .event("bounty_updated")
-                .data(format!(r#"{{"bountyId":"{}"}}"#, bounty_id)))
+                .event(sse_event)
+                .data(serde_json::json!({"bountyId": event.bounty_id}).to_string()))
         })
     });
 
@@ -307,7 +314,9 @@ pub async fn claim_bounty(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let _ = state.bounty_broadcast.send(id.clone());
+    let _ = state
+        .bounty_broadcast
+        .send(crate::events::encode_bounty_event("bounty_claimed", &id));
 
     Json(ClaimResponse {
         id,
